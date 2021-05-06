@@ -3,6 +3,7 @@ Logs/*
 code/Tutorials/Result*
 *.png
 *.jpg
+*.jpeg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
