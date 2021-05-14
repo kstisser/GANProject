@@ -11,7 +11,6 @@ import PIL.Image
 from PIL import Image
 import time
 import functools
-import time
 from datetime import datetime
 
 import sys
@@ -119,8 +118,10 @@ class NeuralStyleTransfer:
         self.testVGGOnContentImg()
 
         # to optimize use a weighted combination of the two losses to get the total loss
-        self.style_weight=1e-2
-        self.content_weight=1e4        
+        #self.style_weight=1e-2
+        #self.content_weight=1e4     
+        self.style_weight=1e-10
+        self.content_weight=1e4   
 
     def runBothModels(self):
         count = 1
@@ -131,6 +132,7 @@ class NeuralStyleTransfer:
             hubImg.save(hubName)
 
             #run self trained method
+            self.opt = None
             selfTrainedImg = self.applyStyle(styleImage)            
             selfTrainedName = os.path.join(self.resultsFolder, (str(count) + ".png"))
             selfTrainedImg.save(selfTrainedName)
@@ -163,11 +165,11 @@ class NeuralStyleTransfer:
 
         #calls the model class to get the gram matrix of the style layers and the content layers
         extractor = StyleContentModel(style_layers, content_layers)
-        style_targets = extractor(style_image)['style']
-        content_targets = extractor(content_image)['content']
+        self.style_targets = extractor(style_image)['style']
+        self.content_targets = extractor(self.content_image)['content']
 
         if verbose:
-            results = extractor(tf.constant(content_image))
+            results = extractor(tf.constant(self.content_image))
             print('Styles:')
             for name, output in sorted(results['style'].items()):
                 print("  ", name)
@@ -186,7 +188,7 @@ class NeuralStyleTransfer:
                 print("    mean: ", output.numpy().mean())
 
         #make tf variable same shape as image to use to optimize the image
-        image = tf.Variable(content_image)
+        image = tf.Variable(self.content_image)
 
         #regularization loss, remove high freq
         if removeHighFrequency:
@@ -195,14 +197,14 @@ class NeuralStyleTransfer:
         #make optimizer- Adam or LBFGS works
         self.opt = tf.optimizers.Adam(learning_rate=0.02, beta_1=0.99, epsilon=1e-1)
 
-        epochs = 10
-        steps_per_epoch = 100
+        epochs = 5
+        steps_per_epoch = 30
 
         step = 0
         for n in range(epochs):
             for m in range(steps_per_epoch):
                 step += 1
-                self.train_step(image, extractor, style_targets, content_targets)
+                self.train_step(image, extractor)
                 print(".", end='')
             #display.clear_output(wait=True)
             #display.display(Supporter.tensor_to_image(image))
@@ -225,10 +227,10 @@ class NeuralStyleTransfer:
         print([(class_name, prob) for (number, class_name, prob) in predicted_top_5])
             
     @tf.function()
-    def train_step(self, image, extractor, style_targets, content_targets):
+    def train_step(self, image, extractor):
         with tf.GradientTape() as tape:
             outputs = extractor(image)
-            loss = self.style_content_loss(outputs, style_targets, content_targets)
+            loss = self.style_content_loss(outputs)
             loss += self.total_variation_weight*tf.image.total_variation(image)
 
         grad = tape.gradient(loss, image)
@@ -251,14 +253,14 @@ class NeuralStyleTransfer:
         return x_var, y_var
 
     # to optimize use a weighted combination of the two losses to get the total loss
-    def style_content_loss(self, outputs, style_targets, content_targets):
+    def style_content_loss(self, outputs):
         style_outputs = outputs['style']
         content_outputs = outputs['content']
-        style_loss = tf.add_n([tf.reduce_mean((style_outputs[name]-style_targets[name])**2) 
+        style_loss = tf.add_n([tf.reduce_mean((style_outputs[name]-self.style_targets[name])**2) 
                             for name in style_outputs.keys()])
         style_loss *= self.style_weight / self.num_style_layers
 
-        content_loss = tf.add_n([tf.reduce_mean((content_outputs[name]-content_targets[name])**2) 
+        content_loss = tf.add_n([tf.reduce_mean((content_outputs[name]-self.content_targets[name])**2) 
                                 for name in content_outputs.keys()])
         content_loss *= self.content_weight / self.num_content_layers
         loss = style_loss + content_loss
@@ -274,6 +276,7 @@ class NeuralStyleTransfer:
 #1. run the example images
 #2. send in an image and have it converted into each image in the style folder, and saved
 if __name__ == "__main__":
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
     exampleMethod = True
     styleImages = []
     if len(sys.argv) < 3:
@@ -299,7 +302,13 @@ if __name__ == "__main__":
             count = 1
             for fileN in os.listdir(directory):
                 print(count, " Adding image: ", fileN)
-                styleImages.append(tf.expand_dims(tf.keras.preprocessing.image.img_to_array(Image.open(os.path.join(directory, fileN))), 0))
+                img = tf.keras.preprocessing.image.img_to_array(Image.open(os.path.join(directory, fileN)))
+                
+                if (len(img.shape) < 4):
+                    img = tf.expand_dims(img, 0)
+                #print(img.shape)
+
+                styleImages.append(img)
                 count = count + 1
         else:
             print("Error! Unable to find the folder to your style images!")

@@ -1,6 +1,6 @@
 *.DS_Store
 Logs/*
-code/Tutorials/Result*
+code/Tutorials/*/Result*
 *.png
 *.jpg
 *.jpeg
