@@ -1,5 +1,8 @@
 *.DS_Store
 Logs/*
+*cifar-10-batches-py*
+*training_checkpoints*
+*cifar-10-python.tar.gz
 code/Tutorials/*/Result*
 *.png
 *.jpg
