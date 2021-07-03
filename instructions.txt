@@ -1,0 +1,18 @@
+ssh -Y stisser.k@login-01.discovery.neu.edu
+
+Software availability:
+module avail
+module load python/3.8.1
+conda create -n gpuEnv python=3.7 anaconda
+conda activate gpuEnv
+conda install -n tensorflow
+conda init bash
+source activate condaEnv
+
+/scratch/stisser.k
+
+srun --partition=gpu --nodes=1 --ntasks=1 --export=ALL --gres=gpu:1 --mem=30Gb --time=08:00:00 --pty /bin/bash
+
+see what jobs I'm running:
+squeue -u stisser.k
+

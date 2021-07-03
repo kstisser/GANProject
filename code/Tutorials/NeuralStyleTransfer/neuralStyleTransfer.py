@@ -1,7 +1,9 @@
 import os
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.applications import vgg19
 import tensorflow as tf
 import tensorflow_hub as hub
-import IPython.display as display
+#import IPython.display as display
 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -67,6 +69,11 @@ class StyleContentModel(tf.keras.models.Model):
 
 class Supporter:
     @staticmethod
+    def adjustRange(images):
+        train_images = images.reshape(images.shape[0], images.shape[1], images.shape[2], images.shape[3]).astype('float32')
+        train_images = (train_images - 127.5) / 127.5  # Normalize the images to [-1, 1]
+
+    @staticmethod
     def getExampleImages():
         content_path = tf.keras.utils.get_file('YellowLabradorLooking_new.jpg', 'https://storage.googleapis.com/download.tensorflow.org/example_images/YellowLabradorLooking_new.jpg')
         style_path = tf.keras.utils.get_file('kandinsky5.jpg','https://storage.googleapis.com/download.tensorflow.org/example_images/Vassily_Kandinsky%2C_1913_-_Composition_7.jpg')
@@ -101,44 +108,66 @@ class Supporter:
         img = img[tf.newaxis, :]
         return img           
 
+    @staticmethod
+    def restrictZeroToOne(img):
+        minVal = img.min()
+        maxVal = img.max()
+
+        img = (img - minVal)/(maxVal-minVal)
+        return img
+
+    @staticmethod
+    def preprocess_image(image_path):
+        img = load_img(image_path)
+        b, g, r = img.split()
+        img = Image.merge("RGB", (r, g, b))
+        img = img_to_array(img)
+        img = np.expand_dims(img, axis=0)
+        img = vgg19.preprocess_input(img)
+        if np.ndim(img)>3:
+            assert img.shape[0] == 1
+            img = img[0]  
+
+        img = Supporter.restrictZeroToOne(img)
+        return img
+
 class NeuralStyleTransfer:
-    def __init__(self, content_image, style_images, resultsFolder):
+    def __init__(self, content_image, style_image, resultsFolder, styleFile, runHub):
         self.content_image = content_image
-        self.style_images = style_images
+        self.styleImage = style_image
         self.resultsFolder = resultsFolder
-        self.total_variation_weight=30
+        self.styleFile = styleFile
+        self.runHub = runHub
 
         # Load compressed models from tensorflow_hub
-        os.environ['TFHUB_MODEL_LOAD_FORMAT'] = 'COMPRESSED'
-        print("Loading model from tensorflow hub")
-        self.hub_model = hub.load('https://tfhub.dev/google/magenta/arbitrary-image-stylization-v1-256/2')
+        if runHub:
+            os.environ['TFHUB_MODEL_LOAD_FORMAT'] = 'COMPRESSED'
+            print("Loading model from tensorflow hub")
+            self.hub_model = hub.load('https://tfhub.dev/google/magenta/arbitrary-image-stylization-v1-256/2')
 
         #test vgg model
-        print("Testing VGG to get top 5 predictions for content image")
-        self.testVGGOnContentImg()
-
-        # to optimize use a weighted combination of the two losses to get the total loss
-        #self.style_weight=1e-2
-        #self.content_weight=1e4     
-        self.style_weight=1e-10
-        self.content_weight=1e4   
+        #print("Testing VGG to get top 5 predictions for content image")
+        #self.testVGGOnContentImg()
+         
+    def setParameters(self, styleWeight, contentWeight, contentLayers, styleLayers, totalVariationWeight, learningRate): 
+        self.styleWeight = styleWeight
+        self.contentWeight = contentWeight 
+        self.contentLayers = contentLayers 
+        self.styleLayers = styleLayers 
+        self.totalVariationWeight = totalVariationWeight 
+        self.learningRate = learningRate
 
     def runBothModels(self):
-        count = 1
-        for styleImage in self.style_images:
-            #run hub method
-            hubImg = self.tensorflowHubStyle(styleImage)
-            hubName = os.path.join(self.resultsFolder, (str(count) + "_hub.png"))
+        #run hub method
+        if self.runHub:
+            hubImg = self.tensorflowHubStyle(self.styleImage)
+            hubName = os.path.join(self.resultsFolder, (self.styleFile + "_hub.png"))
             hubImg.save(hubName)
 
-            #run self trained method
-            self.opt = None
-            selfTrainedImg = self.applyStyle(styleImage)            
-            selfTrainedName = os.path.join(self.resultsFolder, (str(count) + ".png"))
-            selfTrainedImg.save(selfTrainedName)
-
-            count = count + 1
-
+        #run self trained method
+        selfTrainedImg = self.applyStyle()            
+        selfTrainedName = os.path.join(self.resultsFolder, (self.styleFile + ".png"))
+        selfTrainedImg.save(selfTrainedName)
 
     def tensorflowHubStyle(self, style_image):
         #have Tensorflow hub generate the image
@@ -149,23 +178,14 @@ class NeuralStyleTransfer:
         print("Total hub time: {:.1f}".format(end-start))
         return styledImg
 
-    def applyStyle(self, style_image, removeHighFrequency=True, verbose=False):
+    def applyStyle(self, verbose=False):
         start = time.time()
-        #choose intermediate layers to represent the content and style of the image
-        content_layers = ['block5_conv2'] 
-
-        style_layers = ['block1_conv1',
-                        'block2_conv1',
-                        'block3_conv1', 
-                        'block4_conv1', 
-                        'block5_conv1']
-
-        self.num_content_layers = len(content_layers)
-        self.num_style_layers = len(style_layers)
+        self.num_content_layers = len(self.contentLayers)
+        self.num_style_layers = len(self.styleLayers)
 
         #calls the model class to get the gram matrix of the style layers and the content layers
-        extractor = StyleContentModel(style_layers, content_layers)
-        self.style_targets = extractor(style_image)['style']
+        extractor = StyleContentModel(self.styleLayers, self.contentLayers)
+        self.style_targets = extractor(self.styleImage)['style']
         self.content_targets = extractor(self.content_image)['content']
 
         if verbose:
@@ -190,15 +210,11 @@ class NeuralStyleTransfer:
         #make tf variable same shape as image to use to optimize the image
         image = tf.Variable(self.content_image)
 
-        #regularization loss, remove high freq
-        if removeHighFrequency:
-            tf.image.total_variation(image).numpy()
-
         #make optimizer- Adam or LBFGS works
-        self.opt = tf.optimizers.Adam(learning_rate=0.02, beta_1=0.99, epsilon=1e-1)
+        self.opt = tf.optimizers.Adam(learning_rate=self.learningRate, beta_1=0.99, epsilon=1e-1)
 
-        epochs = 5
-        steps_per_epoch = 30
+        epochs = 50
+        steps_per_epoch = 600
 
         step = 0
         for n in range(epochs):
@@ -231,12 +247,12 @@ class NeuralStyleTransfer:
         with tf.GradientTape() as tape:
             outputs = extractor(image)
             loss = self.style_content_loss(outputs)
-            loss += self.total_variation_weight*tf.image.total_variation(image)
+            loss += self.totalVariationWeight*tf.image.total_variation(image)
 
         grad = tape.gradient(loss, image)
         self.opt.apply_gradients([(grad, image)])
         image.assign(self.clip_0_1(image))
-        return image
+        #return image
 
     #the regularization loss associated with variation loss is the sum of squares of the values
     def total_variation_loss(self, image):
@@ -249,7 +265,7 @@ class NeuralStyleTransfer:
     def high_pass_x_y(self, image):
         x_var = image[:, :, 1:, :] - image[:, :, :-1, :]
         y_var = image[:, 1:, :, :] - image[:, :-1, :, :]
-
+        print("Getting x_var: ", x_var, " y_var: ", y_var)
         return x_var, y_var
 
     # to optimize use a weighted combination of the two losses to get the total loss
@@ -258,18 +274,17 @@ class NeuralStyleTransfer:
         content_outputs = outputs['content']
         style_loss = tf.add_n([tf.reduce_mean((style_outputs[name]-self.style_targets[name])**2) 
                             for name in style_outputs.keys()])
-        style_loss *= self.style_weight / self.num_style_layers
+        style_loss *= self.styleWeight / self.num_style_layers
 
         content_loss = tf.add_n([tf.reduce_mean((content_outputs[name]-self.content_targets[name])**2) 
                                 for name in content_outputs.keys()])
-        content_loss *= self.content_weight / self.num_content_layers
+        content_loss *= self.contentWeight / self.num_content_layers
         loss = style_loss + content_loss
         return loss
 
     #keep pixel values between 0 and 1
     def clip_0_1(self, image):
         return tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
-
 
 #######################################################################################################
 #generate two methods of running:
@@ -278,40 +293,6 @@ class NeuralStyleTransfer:
 if __name__ == "__main__":
     print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
     exampleMethod = True
-    styleImages = []
-    if len(sys.argv) < 3:
-        #must be running with example as no path is sent in
-        print("Running example image version. To run a specific image, send in a path to the content image and a folder to the style images!")
-        content_image, style_image = Supporter.getExampleImages()
-        styleImages.append(style_image)
-        print("content image type")
-        print(type(content_image))
-    else:
-        exampleMethod = False
-        fileName = sys.argv[1]
-        folderName = sys.argv[2]
-        directory = os.fsencode(folderName)
-        print("Running style transfer on image: ", fileName)
-        if (os.path.exists(fileName) and os.path.isfile(fileName)):
-            content_image = tf.keras.preprocessing.image.img_to_array(Image.open(fileName))
-            content_image = tf.expand_dims(content_image,0)
-        else:
-            print("Error! Unable to find content image sent in: ", fileName)
-
-        if (os.path.exists(directory) and os.path.isdir(directory)):
-            count = 1
-            for fileN in os.listdir(directory):
-                print(count, " Adding image: ", fileN)
-                img = tf.keras.preprocessing.image.img_to_array(Image.open(os.path.join(directory, fileN)))
-                
-                if (len(img.shape) < 4):
-                    img = tf.expand_dims(img, 0)
-                #print(img.shape)
-
-                styleImages.append(img)
-                count = count + 1
-        else:
-            print("Error! Unable to find the folder to your style images!")
 
     #make a directory with the results
     timeObj = datetime.now()
@@ -320,6 +301,109 @@ if __name__ == "__main__":
     print("Making folder for results: ", resultsPath)
     os.mkdir(resultsPath)
 
-    nst = NeuralStyleTransfer(content_image, styleImages, resultsPath)
-    nst.runBothModels()
+    #set variations to go through
+    '''styleWeights = [1e-10, 1e-4, 1e-2, 1, 1e2, 1e4, 1e10]
+    contentWeights = [1e-10, 1e-4, 1e-2, 1, 1e2, 1e4, 1e10]
+    contentLayers = [['block5_conv2']]
+    styleLayers = [['block1_conv1',
+                        'block2_conv1',
+                        'block3_conv1', 
+                        'block4_conv1', 
+                        'block5_conv1'], 
+                        ['block1_conv1',
+                        'block1_conv2',
+                        'block2_conv1', 
+                        'block2_conv2', 
+                        'block3_conv1',
+                        'block3_conv2']]
+    totalVariationWeights = [1, 5, 15, 30, 100]
+    learningRates = [0.1, 0.01]'''
+
+    styleWeights = [1e-2]
+    contentWeights = [1e10]
+    contentLayers = [['block5_conv2']]
+    styleLayers = [['block1_conv1',
+                        'block1_conv2',
+                        'block2_conv1', 
+                        'block2_conv2', 
+                        'block3_conv1',
+                        'block3_conv2']]
+    totalVariationWeights = [15]
+    learningRates = [0.1] 
+    
+    if len(sys.argv) < 3:
+        #must be running with example as no path is sent in
+        print("Running example image version. To run a specific image, send in a path to the content image and a folder to the style images!")
+        content_image, style_image = Supporter.getExampleImages()
+        print("content image type")
+        print(type(content_image))
+        nst = NeuralStyleTransfer(content_image, style_image, resultsPath, "example", False)
+        nst.runBothModels()
+    else:
+        exampleMethod = False
+        fileName = sys.argv[1]
+        folderName = sys.argv[2]
+        directory = os.fsencode(folderName)
+        print("Running style transfer on image: ", fileName)
+        if (os.path.exists(fileName) and os.path.isfile(fileName)):
+            print("Reading in content image: ", fileName)
+            #content_image = tf.keras.preprocessing.image.img_to_array(Image.open(fileName))
+            #content_image = tf.expand_dims(content_image,0)
+            content_image = Supporter.preprocess_image(fileName)
+            print("Min content img: ", content_image.min()) #np.argmin(content_image))
+            print("Max content img: ", content_image.max()) #np.argmax(content_image))            
+            if (len(content_image.shape) < 4):
+                content_image = tf.expand_dims(content_image, 0)
+                print("Adding dimension")
+            print("Content image shape: ", content_image.shape)
+
+        else:
+            print("Error! Unable to find content image sent in: ", fileName)
+
+        if (os.path.exists(directory) and os.path.isdir(directory)):
+            count = 1
+            for fileN in os.listdir(directory):
+                print(count, " Adding image: ", fileN)
+                #img = tf.keras.preprocessing.image.img_to_array(Image.open(os.path.join(directory, fileN)))
+                img = Supporter.preprocess_image(os.path.join(directory, fileN))
+                print("Min style img: ", img.min()) #np.argmin(img))
+                print("Max style img: ", img.max()) #np.argmax(img))                
+                if (len(img.shape) < 4):
+                    img = tf.expand_dims(img, 0)
+                    print("Adding dimension")
+                print("style img shape: ", img.shape)
+
+                count = count + 1
+
+                styleImage = img
+                print("About to train for style image: ", fileN)
+
+                fname = str(fileN)
+                
+                clCount = 0
+                #for contentLayer in contentLayers:
+                #    clCount = clCount + 1
+                slCount = 0
+                for styleLayer in styleLayers:
+                    slCount = slCount + 1
+                    tvwCount = 0
+                    for totalVariationWeight in totalVariationWeights:
+                        tvwCount = tvwCount + 1
+                        lrCount = 0
+                        for learningRate in learningRates:
+                            lrCount = lrCount + 1
+                            swCount = 0
+                            for styleWeight in styleWeights:
+                                swCount = swCount + 1
+                                cwCount = 0
+                                for contentWeight in contentWeights:
+                                    cwCount = cwCount + 1
+                                    print("Training style layer: ", styleLayer, " total variation weight: ", totalVariationWeight, " learning rate: ", learningRate, " style weight: ", styleWeight, " content weight: ", contentWeight)
+                                    newFileName = fname[2:-1] + "sw" + str(swCount) + "cw" + str(cwCount) + "sl" + str(slCount) + "tvw" + str(tvwCount) + "lr" + str(lrCount)
+                                    nst = NeuralStyleTransfer(content_image, styleImage, resultsPath, newFileName, False)
+                                    nst.setParameters(styleWeight, contentWeight, contentLayers[0], styleLayer, totalVariationWeight, learningRate)
+                                    nst.runBothModels()
+        else:
+            print("Error! Unable to find the folder to your style images!")
+
 
